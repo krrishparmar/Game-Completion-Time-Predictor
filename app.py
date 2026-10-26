@@ -3,6 +3,7 @@
 Streamlit frontend for multi-output regression on HowLongToBeat data.
 """
 
+import os
 import streamlit as st
 import pandas as pd
 import numpy as np
@@ -424,7 +425,10 @@ def format_hours(h):
 #  MAIN APP
 # ══════════════════════════════════════════════════════════════════════════════
 
-CSV_PATH = "/Users/krrishparmar/Downloads/archive/hltb_dataset.csv"
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+LOCAL_CSV = os.path.join(BASE_DIR, "hltb_dataset.csv")
+CSV_PATH = LOCAL_CSV if os.path.exists(LOCAL_CSV) else "/Users/krrishparmar/Downloads/archive/hltb_dataset.csv"
+
 
 # ── Hero ─────────────────────────────────────────────────────────────────────
 st.markdown("""
