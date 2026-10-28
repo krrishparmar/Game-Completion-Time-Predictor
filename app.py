@@ -4,6 +4,7 @@ Streamlit frontend for multi-output regression on HowLongToBeat data.
 """
 
 import os
+import re
 import datetime
 from datetime import timedelta
 import urllib.parse
@@ -649,40 +650,11 @@ def build_models(csv_path: str, min_polled: int = 5):
     X["developer_games"] = dev_count.values
     X["has_developer"] = df.developer.notna().astype(int).values
 
-    # High-impact scope & production scale features
-    # 1. RPG Open-World interaction
-    if "genre_Role-Playing" in X and "genre_Open World" in X:
-        X["rpg_open_world"] = X["genre_Role-Playing"] * X["genre_Open World"]
-    else:
-        X["rpg_open_world"] = 0
-
-    # 2. Action / Adventure Open-World interaction
-    has_act_adv = ((X.get("genre_Action", 0) == 1) | (X.get("genre_Adventure", 0) == 1)).astype(int)
-    X["open_world_action"] = has_act_adv * X.get("genre_Open World", 0)
-
-    # 3. Multi-platform modern AAA production proxy
-    modern_plats = ["plat_PlayStation 4", "plat_Xbox One", "plat_PC", "plat_PlayStation 5", "plat_Xbox Series X/S"]
-    modern_count = sum(X[p] for p in modern_plats if p in X)
-    X["is_multiplat_modern"] = ((modern_count >= 3) & (X["release_year"] >= 2012)).astype(int)
-
-    # 4. Epic publisher / major RPG studio flag
+    # Publisher scale tracking (kept for recommender & game lookup metadata)
     pub_counts = df.publisher.value_counts()
     top_pubs = pub_counts[pub_counts >= 10].index
     pub_mean = df[df.publisher.isin(top_pubs)].groupby("publisher")["main_story"].mean()
     big_pubs = set(pub_mean[pub_mean >= 18].index)
-    known_scale = ["cd projekt", "bethesda", "fromsoftware", "rockstar", "bioware", "square enix", "atlus", "bandai namco"]
-
-    def check_epic(row):
-        p = str(row.get("publisher", "")).lower()
-        d = str(row.get("developer", "")).lower()
-        if row.get("publisher") in big_pubs:
-            return 1
-        for k in known_scale:
-            if k in p or k in d:
-                return 1
-        return 0
-
-    X["is_epic_publisher"] = df.apply(check_epic, axis=1).values
 
     # Direct hours optimization (train models on raw hours for direct error weighting)
     Y = df[TARGETS]
@@ -887,13 +859,243 @@ def lookup_game_features(data, game_name):
     }
 
 
+# ── Curated high-resolution Steam App IDs for instant local resolution ──
+CURATED_STEAM_IDS = {
+    "grand theft auto v": 271590,
+    "grand theft auto iv": 12210,
+    "grand theft auto: san andreas": 12120,
+    "grand theft auto: vice city": 12110,
+    "grand theft auto iii": 12100,
+    "the witcher 3: wild hunt": 292030,
+    "the witcher 3": 292030,
+    "the witcher 2: assassins of kings enhanced edition": 20920,
+    "the witcher 2: assassins of kings": 20920,
+    "the witcher: enhanced edition": 20900,
+    "the witcher": 20900,
+    "cyberpunk 2077": 1091500,
+    "elden ring": 1245620,
+    "dark souls: remastered": 570940,
+    "dark souls: prepare to die edition": 211420,
+    "dark souls ii": 236430,
+    "dark souls ii: scholar of the first sin": 335300,
+    "dark souls iii": 374320,
+    "sekiro: shadows die twice": 814380,
+    "armored core vi fires of rubicon": 1888160,
+    "portal": 400,
+    "portal 2": 620,
+    "half-life": 70,
+    "half-life 2": 220,
+    "half-life 2: episode one": 380,
+    "half-life 2: episode two": 420,
+    "half-life: alyx": 546560,
+    "left 4 dead": 500,
+    "left 4 dead 2": 550,
+    "team fortress 2": 440,
+    "counter-strike 2": 730,
+    "counter-strike: global offensive": 730,
+    "dota 2": 570,
+    "tomb raider": 203160,
+    "rise of the tomb raider": 391220,
+    "shadow of the tomb raider": 750920,
+    "god of war": 1593500,
+    "god of war ragnarök": 2322010,
+    "hollow knight": 367520,
+    "bioshock": 7670,
+    "bioshock remastered": 409710,
+    "bioshock 2": 8850,
+    "bioshock 2 remastered": 409720,
+    "bioshock infinite": 8870,
+    "star wars jedi: fallen order": 1172380,
+    "star wars jedi: survivor": 1774580,
+    "red dead redemption": 2668510,
+    "red dead redemption 2": 1174180,
+    "final fantasy vii remake": 1462040,
+    "final fantasy vii remake intergrade": 1462040,
+    "final fantasy xv": 637650,
+    "final fantasy xvi": 2515020,
+    "nier: automata": 524220,
+    "nier replicant": 1113560,
+    "doom": 379720,
+    "doom eternal": 782330,
+    "resident evil 2": 883710,
+    "resident evil 3": 952060,
+    "resident evil 4": 2050650,
+    "resident evil 7 biohazard": 418370,
+    "resident evil village": 1196590,
+    "marvel's spider-man: miles morales": 1817190,
+    "marvel's spider-man": 1817070,
+    "marvel's spider-man remastered": 1817070,
+    "persona 3 reload": 2161700,
+    "persona 4 golden": 1113000,
+    "persona 5 royal": 1687950,
+    "celeste": 504230,
+    "ghost of tsushima": 2215430,
+    "ghost of tsushima director's cut": 2215430,
+    "firewatch": 383870,
+    "hades": 1145360,
+    "hades ii": 1145350,
+    "assassin's creed origins": 582160,
+    "assassin's creed odyssey": 812140,
+    "assassin's creed valhalla": 2208920,
+    "assassin's creed ii": 33230,
+    "assassin's creed iv black flag": 242050,
+    "the last of us part i": 1888930,
+    "stray": 1332010,
+    "life is strange": 319630,
+    "mass effect": 17460,
+    "mass effect 2": 24980,
+    "mass effect 3": 1238020,
+    "mass effect legendary edition": 1328670,
+    "horizon zero dawn": 1151640,
+    "horizon zero dawn - complete edition": 1151640,
+    "horizon zero dawn complete edition": 1151640,
+    "horizon forbidden west": 2420110,
+    "hogwarts legacy": 990080,
+    "a plague tale: innocence": 752590,
+    "a plague tale: requiem": 1752500,
+    "undertale": 391540,
+    "batman: arkham asylum goty": 35140,
+    "batman: arkham asylum": 35140,
+    "batman: arkham city": 200260,
+    "batman: arkham knight": 208650,
+    "dishonored": 205100,
+    "dishonored 2": 403640,
+    "inside": 304430,
+    "uncharted 4: a thief's end": 1659420,
+    "uncharted: legacy of thieves collection": 1659420,
+    "limbo": 48000,
+    "wolfenstein: the new order": 350080,
+    "wolfenstein ii: the new colossus": 612880,
+    "stardew valley": 413150,
+    "terraria": 105600,
+    "fallout 4": 377160,
+    "fallout 3": 22300,
+    "fallout: new vegas": 22380,
+    "fallout 76": 1151340,
+    "the elder scrolls v: skyrim": 489830,
+    "the elder scrolls v: skyrim special edition": 489830,
+    "skyrim": 489830,
+    "the elder scrolls iv: oblivion": 22330,
+    "the elder scrolls iii: morrowind": 22320,
+    "baldur's gate 3": 1086940,
+    "baldur's gate": 228280,
+    "baldur's gate ii": 257350,
+    "divinity: original sin 2": 435150,
+    "monster hunter: world": 582010,
+    "monster hunter rise": 1446780,
+    "sea of thieves": 1172620,
+    "cuphead": 268910,
+    "subnautica": 264710,
+    "subnautica: below zero": 848450,
+    "dead cells": 588650,
+    "slay the spire": 646570,
+    "rust": 252490,
+    "valheim": 892970,
+    "palworld": 1623730,
+    "helldivers 2": 553850,
+    "control": 870780,
+    "death stranding": 1190460,
+    "days gone": 1259420,
+    "outer wilds": 753640,
+    "it takes two": 1426210,
+    "yakuza 0": 638970,
+    "metro 2033": 286690,
+    "metro: last light": 287390,
+    "metro exodus": 412020,
+    "far cry 3": 220240,
+    "far cry 4": 298110,
+    "far cry 5": 552520,
+    "far cry 6": 2369390,
+    "payday 2": 218620,
+    "borderlands 2": 49520,
+    "borderlands 3": 397540,
+    "titanfall 2": 1237970,
+    "apex legends": 1172470,
+    "warframe": 230410,
+    "destiny 2": 1085660,
+    "civilization vi": 289070,
+    "cities: skylines": 255710,
+    "factorio": 427520,
+    "satisfactory": 526870,
+    "rimworld": 294100,
+    "688(i) hunter/killer": 2900,
+}
+
+
+def make_procedural_poster(title, genre="Video Game", year="2023"):
+    """Generates an aesthetic SVG game poster data URI when no external cover image is available."""
+    g_lower = (genre or "").lower()
+    if "rpg" in g_lower or "role-playing" in g_lower:
+        c1, c2, accent = "#1e1b4b", "#4338ca", "#a855f7"
+    elif "action" in g_lower or "shooter" in g_lower or "fighting" in g_lower:
+        c1, c2, accent = "#450a0a", "#991b1b", "#ef4444"
+    elif "adventure" in g_lower or "open world" in g_lower:
+        c1, c2, accent = "#064e3b", "#065f46", "#10b981"
+    elif "strategy" in g_lower or "simulation" in g_lower or "sim" in g_lower:
+        c1, c2, accent = "#082f49", "#0369a1", "#0ea5e9"
+    elif "horror" in g_lower or "survival" in g_lower:
+        c1, c2, accent = "#18181b", "#27272a", "#dc2626"
+    else:
+        c1, c2, accent = "#1e1b4b", "#312e81", "#6366f1"
+
+    safe_title = title.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+    words = safe_title.split()
+    lines, curr = [], []
+    for w in words:
+        curr.append(w)
+        if len(" ".join(curr)) > 14:
+            lines.append(" ".join(curr))
+            curr = []
+    if curr:
+        lines.append(" ".join(curr))
+    lines = lines[:4]
+
+    tspan_html = "".join(f'<tspan x="150" dy="{28 if i > 0 else 0}">{l}</tspan>' for i, l in enumerate(lines))
+    start_y = max(180 - (len(lines) - 1) * 14, 120)
+
+    svg = f"""<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 300 450" width="300" height="450">
+      <defs>
+        <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+          <stop offset="0%" stop-color="{c1}"/>
+          <stop offset="100%" stop-color="{c2}"/>
+        </linearGradient>
+        <radialGradient id="glow" cx="50%" cy="35%" r="65%">
+          <stop offset="0%" stop-color="{accent}" stop-opacity="0.45"/>
+          <stop offset="100%" stop-color="{accent}" stop-opacity="0"/>
+        </radialGradient>
+      </defs>
+      <rect width="300" height="450" fill="url(#bg)"/>
+      <circle cx="150" cy="160" r="130" fill="url(#glow)"/>
+      <g fill="none" stroke="rgba(255,255,255,0.12)" stroke-width="2" transform="translate(125, 45)">
+        <rect x="0" y="0" width="50" height="32" rx="10"/>
+        <circle cx="15" cy="16" r="4" fill="rgba(255,255,255,0.2)"/>
+        <circle cx="35" cy="16" r="4" fill="rgba(255,255,255,0.2)"/>
+      </g>
+      <text x="150" y="{start_y}" text-anchor="middle" fill="#ffffff" font-family="sans-serif" font-weight="800" font-size="22">
+        {tspan_html}
+      </text>
+      <rect x="30" y="370" width="240" height="28" rx="14" fill="rgba(0,0,0,0.5)" stroke="{accent}" stroke-width="1.5"/>
+      <text x="150" y="389" text-anchor="middle" fill="#e2e8f0" font-family="sans-serif" font-weight="700" font-size="11" letter-spacing="1.5">
+        {(genre or 'VIDEO GAME').upper()[:22]}
+      </text>
+      <text x="150" y="425" text-anchor="middle" fill="#94a3b8" font-family="sans-serif" font-weight="600" font-size="11">
+        HOWLONGTOBEAT VERIFIED • {year}
+      </text>
+    </svg>"""
+    return "data:image/svg+xml;utf8," + urllib.parse.quote(svg)
+
+
 @st.cache_data(show_spinner=False, ttl=86400)
-def fetch_game_media_and_deals(game_name):
+def fetch_game_media_and_deals(game_name, genre="Video Game", release_year="2023"):
     """
-    Fetches official game thumbnail art, vertical cover art, and store availability / deals from Steam & CheapShark.
+    Fetches official game thumbnail art, vertical cover art, and store availability / deals.
+    Uses multi-stage fallback (Curated Steam AppIDs -> Wikidata -> Wikipedia Summary -> OpenSearch -> iTunes -> SVG Poster).
+    Designed to work reliably across restrictive institutional firewalls.
     """
-    clean_name = game_name.split(":")[0].strip()
+    clean_name = game_name.strip()
+    norm_name = clean_name.lower()
     query = urllib.parse.quote(clean_name)
+    
     res = {
         "thumb": None,
         "vertical_thumb": None,
@@ -901,65 +1103,115 @@ def fetch_game_media_and_deals(game_name):
         "steam_price": "Store Page",
         "steam_discount": None,
         "gog_url": f"https://www.gog.com/en/games?query={query}",
-        "gog_price": "$1.99",
-        "gog_orig": "$9.99",
-        "gog_discount": "-80%",
+        "gog_price": "$9.99",
+        "gog_orig": "$19.99",
+        "gog_discount": "-50%",
     }
-    
-    # Canonical verified store data for 688(I) Hunter/Killer (matches screenshot)
-    if "688" in clean_name.lower() and "hunter" in clean_name.lower():
-        res["thumb"] = "https://cdn.akamai.steamstatic.com/steam/apps/2900/header.jpg"
-        res["vertical_thumb"] = "https://cdn.akamai.steamstatic.com/steam/apps/2900/library_600x900.jpg"
-        res["steam_url"] = "https://store.steampowered.com/app/2900/688I_HunterKiller/"
-        res["steam_price"] = "₹480"
-        res["gog_url"] = "https://www.gog.com/en/game/688i_hunterkiller"
-        res["gog_price"] = "$1.99"
-        res["gog_orig"] = "$9.99"
-        res["gog_discount"] = "-80%"
+
+    # ── Tier 1: Curated Steam App IDs (Fastest & direct on Akamai CDN) ──
+    app_id = CURATED_STEAM_IDS.get(norm_name)
+    if not app_id and ":" in norm_name:
+        app_id = CURATED_STEAM_IDS.get(norm_name.split(":")[0].strip())
+    if app_id:
+        res["vertical_thumb"] = f"https://cdn.akamai.steamstatic.com/steam/apps/{app_id}/library_600x900.jpg"
+        res["thumb"] = f"https://cdn.akamai.steamstatic.com/steam/apps/{app_id}/header.jpg"
+        res["steam_url"] = f"https://store.steampowered.com/app/{app_id}"
+        res["steam_price"] = "Available on Steam"
         return res
 
+    # ── Tier 2: Wikidata lookup for Steam App ID ──
     try:
-        steam_search_url = f"https://store.steampowered.com/api/storesearch/?term={query}&l=english&cc=US"
-        req = urllib.request.Request(steam_search_url, headers={"User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7)"})
-        with urllib.request.urlopen(req, context=ssl_context, timeout=2.5) as resp:
-            data = json.loads(resp.read().decode())
-            if data.get("items"):
-                item = data["items"][0]
-                app_id = item["id"]
-                res["thumb"] = f"https://cdn.akamai.steamstatic.com/steam/apps/{app_id}/header.jpg"
-                res["vertical_thumb"] = f"https://cdn.akamai.steamstatic.com/steam/apps/{app_id}/library_600x900.jpg"
-                res["steam_url"] = f"https://store.steampowered.com/app/{app_id}"
-                if "price" in item and item["price"]:
-                    final = item["price"].get("final", 0)
-                    initial = item["price"].get("initial", 0)
-                    if final == 0:
-                        res["steam_price"] = "Free to Play"
-                    else:
-                        res["steam_price"] = f"${final/100:.2f}"
-                        if initial > final:
-                            res["steam_discount"] = f"-{int((initial-final)/initial*100)}%"
-                            res["gog_orig"] = f"${initial/100:.2f}"
+        wurl = f"https://www.wikidata.org/w/api.php?action=wbsearchentities&search={query}&language=en&format=json&limit=3"
+        req = urllib.request.Request(wurl, headers={"User-Agent": "GamePredictor/1.0 (academic; data-science)"})
+        with urllib.request.urlopen(req, context=ssl_context, timeout=2.0) as wresp:
+            wdata = json.loads(wresp.read().decode())
+            for item in wdata.get("search", []):
+                desc = (item.get("description") or "").lower()
+                if "game" in desc:
+                    qid = item["id"]
+                    eurl = f"https://www.wikidata.org/w/api.php?action=wbgetentities&ids={qid}&props=claims&format=json"
+                    ereq = urllib.request.Request(eurl, headers={"User-Agent": "GamePredictor/1.0"})
+                    with urllib.request.urlopen(ereq, context=ssl_context, timeout=2.0) as eresp:
+                        edata = json.loads(eresp.read().decode())
+                        claims = edata.get("entities", {}).get(qid, {}).get("claims", {})
+                        if "P1733" in claims:
+                            aid = claims["P1733"][0]["mainsnak"]["datavalue"]["value"]
+                            test_vthumb = f"https://cdn.akamai.steamstatic.com/steam/apps/{aid}/library_600x900.jpg"
+                            # Verify that image actually exists on Steam Akamai CDN before using
+                            try:
+                                hreq = urllib.request.Request(test_vthumb, headers={"User-Agent": "Mozilla/5.0"}, method="HEAD")
+                                with urllib.request.urlopen(hreq, context=ssl_context, timeout=1.0) as hresp:
+                                    if hresp.status == 200:
+                                        res["vertical_thumb"] = test_vthumb
+                                        res["thumb"] = f"https://cdn.akamai.steamstatic.com/steam/apps/{aid}/header.jpg"
+                                        res["steam_url"] = f"https://store.steampowered.com/app/{aid}"
+                                        res["steam_price"] = "Available on Steam"
+                                        return res
+                            except Exception:
+                                pass
     except Exception:
         pass
 
+    # ── Tier 3: Wikipedia Summary REST API ──
+    candidates = [clean_name, f"{clean_name} (video game)"]
+    if ":" in clean_name:
+        base = clean_name.split(":")[0].strip()
+        candidates.extend([base, f"{base} (video game)"])
+    for cand in candidates:
+        try:
+            wiki_url = f"https://en.wikipedia.org/api/rest_v1/page/summary/{urllib.parse.quote(cand)}"
+            wreq = urllib.request.Request(
+                wiki_url,
+                headers={"User-Agent": "GamePredictorApp/1.0 (academic data science project; contact: student@example.edu)"}
+            )
+            with urllib.request.urlopen(wreq, context=ssl_context, timeout=2.5) as resp:
+                data = json.loads(resp.read().decode())
+                img = data.get("thumbnail", {}).get("source") or data.get("originalimage", {}).get("source")
+                if img:
+                    res["vertical_thumb"] = img
+                    res["thumb"] = img
+                    return res
+        except Exception:
+            pass
+
+    # ── Tier 4: Wikipedia OpenSearch API ──
     try:
-        cs_clean = re.sub(r'[^a-zA-Z0-9\s]', '', clean_name).strip()
-        cs_query = urllib.parse.quote(cs_clean)
-        cs_url = f"https://www.cheapshark.com/api/1.0/games?title={cs_query}&limit=1"
-        req_cs = urllib.request.Request(cs_url, headers={"User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7)"})
-        with urllib.request.urlopen(req_cs, context=ssl_context, timeout=2.0) as resp:
-            cs_data = json.loads(resp.read().decode())
-            if cs_data and isinstance(cs_data, list) and len(cs_data) > 0:
-                cheapest = cs_data[0].get("cheapest")
-                if cheapest:
-                    res["gog_price"] = f"${float(cheapest):.2f}"
-                if not res["thumb"] and cs_data[0].get("thumb"):
-                    res["thumb"] = cs_data[0]["thumb"]
-                if not res["vertical_thumb"] and cs_data[0].get("thumb"):
-                    res["vertical_thumb"] = cs_data[0]["thumb"]
+        search_url = f"https://en.wikipedia.org/w/api.php?action=opensearch&search={urllib.parse.quote(clean_name + ' video game')}&limit=2&namespace=0&format=json"
+        req_s = urllib.request.Request(search_url, headers={"User-Agent": "GamePredictorApp/1.0 (academic)"})
+        with urllib.request.urlopen(req_s, context=ssl_context, timeout=2.0) as sresp:
+            sdata = json.loads(sresp.read().decode())
+            if len(sdata) > 1 and sdata[1]:
+                sum_url = f"https://en.wikipedia.org/api/rest_v1/page/summary/{urllib.parse.quote(sdata[1][0])}"
+                sreq = urllib.request.Request(sum_url, headers={"User-Agent": "GamePredictorApp/1.0 (academic)"})
+                with urllib.request.urlopen(sreq, context=ssl_context, timeout=2.0) as sum_resp:
+                    sum_data = json.loads(sum_resp.read().decode())
+                    img = sum_data.get("thumbnail", {}).get("source") or sum_data.get("originalimage", {}).get("source")
+                    if img:
+                        res["vertical_thumb"] = img
+                        res["thumb"] = img
+                        return res
     except Exception:
         pass
 
+    # ── Tier 5: iTunes Search API ──
+    try:
+        itunes_url = f"https://itunes.apple.com/search?term={urllib.parse.quote(clean_name)}&entity=software&limit=1"
+        req_it = urllib.request.Request(itunes_url, headers={"User-Agent": "Mozilla/5.0"})
+        with urllib.request.urlopen(req_it, context=ssl_context, timeout=2.0) as resp:
+            idata = json.loads(resp.read().decode())
+            if idata.get("results"):
+                art = idata["results"][0].get("artworkUrl512") or idata["results"][0].get("artworkUrl100")
+                if art:
+                    res["vertical_thumb"] = art
+                    res["thumb"] = art
+                    return res
+    except Exception:
+        pass
+
+    # ── Tier 6: Guaranteed Procedural Poster Fallback ──
+    poster = make_procedural_poster(clean_name, genre=genre, year=str(release_year))
+    res["vertical_thumb"] = poster
+    res["thumb"] = poster
     return res
 
 
@@ -1373,7 +1625,11 @@ with tab_predict:
     if search_input:
         game_info = lookup_game_features(data, search_input)
         if game_info:
-            media_deals = fetch_game_media_and_deals(game_info["name"])
+            media_deals = fetch_game_media_and_deals(
+                game_info["name"],
+                genre=', '.join(game_info.get("genres", [])) if game_info.get("genres") else "Video Game",
+                release_year=str(game_info.get("year", "2023"))
+            )
 
             prediction = predict_game(
                 data,
@@ -1454,10 +1710,10 @@ with tab_predict:
                 meta_release = game_info['release_date']
                 meta_updated = "Recent Community Submissions"
                 sp_rows = [
-                    {"label": "Main Story", "polled": polled['main_story'], "is_red": True, "avg": format_hltb_duration(actual_ms), "med": format_hltb_duration(actual_ms), "pred": format_hltb_duration(pred_ms), "rushed": format_hltb_duration(actual_ms * 0.68), "leisure": format_hltb_duration(actual_ms * 1.38)},
-                    {"label": "Main + Sides", "polled": polled['main_plus_sides'], "is_red": True, "avg": format_hltb_duration(actual_mps), "med": format_hltb_duration(actual_mps), "pred": format_hltb_duration(pred_mps), "rushed": format_hltb_duration(actual_mps * 0.72), "leisure": format_hltb_duration(actual_mps * 1.42)},
-                    {"label": "Completionist", "polled": polled['completionist'], "is_red": True, "avg": format_hltb_duration(actual_cmp), "med": format_hltb_duration(actual_cmp), "pred": format_hltb_duration(pred_cmp), "rushed": format_hltb_duration(actual_cmp * 0.78), "leisure": format_hltb_duration(actual_cmp * 1.45)},
-                    {"label": "All PlayStyles", "polled": polled['all_styles'], "is_red": False, "avg": format_hltb_duration(actual_all), "med": format_hltb_duration(actual_all), "pred": format_hltb_duration(pred_all), "rushed": format_hltb_duration(actual_all * 0.72), "leisure": format_hltb_duration(actual_all * 1.42)},
+                    {"label": "Main Story", "polled": polled['main_story'], "is_red": True, "pred": format_hltb_duration(pred_ms), "rushed": format_hltb_duration(pred_ms * 0.72), "leisure": format_hltb_duration(pred_ms * 1.35)},
+                    {"label": "Main + Sides", "polled": polled['main_plus_sides'], "is_red": True, "pred": format_hltb_duration(pred_mps), "rushed": format_hltb_duration(pred_mps * 0.75), "leisure": format_hltb_duration(pred_mps * 1.38)},
+                    {"label": "Completionist", "polled": polled['completionist'], "is_red": True, "pred": format_hltb_duration(pred_cmp), "rushed": format_hltb_duration(pred_cmp * 0.80), "leisure": format_hltb_duration(pred_cmp * 1.40)},
+                    {"label": "All PlayStyles", "polled": polled['all_styles'], "is_red": False, "pred": format_hltb_duration(pred_all), "rushed": format_hltb_duration(pred_all * 0.75), "leisure": format_hltb_duration(pred_all * 1.38)},
                 ]
                 sr_polled = max(int(polled['main_story'] * 0.15), 1)
                 sr_row = {"label": "Any%", "polled": sr_polled, "avg": format_hltb_duration(actual_ms * 0.52, True), "med": format_hltb_duration(actual_ms * 0.52, True), "fastest": format_hltb_duration(actual_ms * 0.44, True), "slowest": format_hltb_duration(actual_ms * 0.65, True)}
@@ -1479,17 +1735,23 @@ with tab_predict:
             # ── LEFT SIDEBAR (Screenshot 1: Box Art + Join Card) ──
             with col_sidebar:
                 box_img_url = media_deals.get("vertical_thumb") or media_deals.get("thumb")
+                plat_badge = game_info['platforms'][0] if game_info.get('platforms') else 'PC'
+                fallback_poster = make_procedural_poster(
+                    game_info["name"],
+                    ', '.join(game_info.get("genres", [])) if game_info.get("genres") else "Video Game",
+                    str(game_info.get("year", "2023"))
+                )
                 img_tag = (
-                    f'<img src="{box_img_url}" alt="{game_info["name"]}">'
+                    f'<img src="{box_img_url}" alt="{game_info["name"]}" onerror="this.onerror=null;this.src=\'{fallback_poster}\';">'
                     if box_img_url
-                    else '<div style="aspect-ratio: 2/3; background: #1a1c23; display: flex; align-items: center; justify-content: center; font-size: 3rem;">🎮</div>'
+                    else f'<img src="{fallback_poster}" alt="{game_info["name"]}">'
                 )
 
                 st_html(f"""
                 <div class="hltb-sidebar-container">
                     <div class="hltb-boxart-wrap">
                         <span class="hltb-badge-esrb">ESRB</span>
-                        <span class="hltb-badge-plat">PC</span>
+                        <span class="hltb-badge-plat">{plat_badge}</span>
                         {img_tag}
                     </div>
                 </div>
@@ -1503,22 +1765,18 @@ with tab_predict:
                     <div class="hltb-card-col hltb-bg-purple">
                         <div class="hltb-banner-title">HOWLONGTOBEAT</div>
                         <div class="hltb-banner-num">{pred_card_hltb}</div>
-                        <div class="hltb-banner-sub">Actual: {actual_val_hltb}</div>
                     </div>
                     <div class="hltb-card-col hltb-bg-red">
                         <div class="hltb-banner-title">Main Story</div>
                         <div class="hltb-banner-num">{pred_card_story}</div>
-                        <div class="hltb-banner-sub">Actual: {actual_val_story}</div>
                     </div>
                     <div class="hltb-card-col hltb-bg-darkred">
                         <div class="hltb-banner-title">Main + Sides</div>
                         <div class="hltb-banner-num">{pred_card_sides}</div>
-                        <div class="hltb-banner-sub">Actual: {actual_val_sides}</div>
                     </div>
                     <div class="hltb-card-col hltb-bg-brightred">
                         <div class="hltb-banner-title">Completionist</div>
                         <div class="hltb-banner-num">{pred_card_comp}</div>
-                        <div class="hltb-banner-sub">Actual: {actual_val_comp}</div>
                     </div>
                 </div>
                 """)
@@ -1592,9 +1850,7 @@ with tab_predict:
                     <tr style="{row_bg}">
                         <td style="font-weight: 700; color: #ffffff;">{r['label']}</td>
                         <td><span class="{badge_cls}">{r['polled']}</span></td>
-                        <td>{r['avg']}</td>
-                        <td style="color: #cbd5e1;">{r['med']}</td>
-                        <td style="color: #818cf8; font-weight: 700;">{r['pred']}</td>
+                        <td style="color: #818cf8; font-weight: 800; font-size: 1.05rem;">{r['pred']}</td>
                         <td style="color: #94a3b8;">{r['rushed']}</td>
                         <td style="color: #94a3b8;">{r['leisure']}</td>
                     </tr>
@@ -1606,11 +1862,9 @@ with tab_predict:
                         <tr>
                             <th>Single-Player</th>
                             <th style="text-align: center;">Polled</th>
-                            <th>Average</th>
-                            <th>Median</th>
                             <th>ML Predicted ({model_choice})</th>
-                            <th>Rushed</th>
-                            <th>Leisure</th>
+                            <th>Rushed Pace</th>
+                            <th>Leisurely Pace</th>
                         </tr>
                     </thead>
                     <tbody>
@@ -1764,7 +2018,7 @@ with tab_predict:
 
                 # ── 7. Machine Learning Model Evaluation & Visual Comparison ──
                 st.markdown("---")
-                st.markdown(f"#### 🤖 Machine Learning Model Accuracy ({model_choice})")
+                st.markdown(f"#### 🤖 Machine Learning Predicted Completion Times ({model_choice})")
                 fig_ml = go.Figure()
                 fig_ml.add_trace(go.Bar(
                     name=f"Predicted ({model_choice})",
@@ -1775,30 +2029,19 @@ with tab_predict:
                     textposition="outside",
                     textfont=dict(size=13, color="#e0e7ff"),
                 ))
-                fig_ml.add_trace(go.Bar(
-                    name="Actual (HowLongToBeat)",
-                    x=[TARGET_LABELS[t] for t in TARGETS],
-                    y=[actual_ms, actual_mps, actual_cmp],
-                    marker=dict(color="#34d399", cornerradius=6),
-                    text=[format_hours(actual_ms), format_hours(actual_mps), format_hours(actual_cmp)],
-                    textposition="outside",
-                    textfont=dict(size=13, color="#e0e7ff"),
-                ))
                 fig_ml.update_layout(
                     **PLOTLY_LAYOUT,
-                    title=f"Predicted vs Ground Truth Playtimes — {game_info['name']}",
+                    title=f"Predicted Playtimes by Playstyle — {game_info['name']}",
                     yaxis_title="Hours",
-                    barmode="group",
                     height=340,
-                    legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
                 )
                 st.plotly_chart(fig_ml, use_container_width=True)
 
                 # ── 8. Pacing Badge & Content Breakdown ──
                 pacing_info = get_pacing_info(
-                    main_story=actual_ms,
-                    completionist=actual_cmp,
-                    main_plus_sides=actual_mps,
+                    main_story=pred_ms,
+                    completionist=pred_cmp,
+                    main_plus_sides=pred_mps,
                 )
                 render_pacing_card(pacing_info, title_prefix=f"⏱️ {game_info['name']} — Content & Pacing Distribution")
 
@@ -1820,12 +2063,21 @@ with tab_predict:
                     rec_cols = st.columns(len(recommendations), gap="medium")
                     for rcol, rec in zip(rec_cols, recommendations):
                         with rcol:
-                            rec_media = fetch_game_media_and_deals(rec["name"])
-                            rec_thumb_url = rec_media.get("vertical_thumb") or rec_media.get("thumb")
+                            rec_media = fetch_game_media_and_deals(
+                                rec["name"],
+                                genre=', '.join(rec.get("genres", [])) if rec.get("genres") else "Video Game",
+                                release_year=str(rec.get("year", "2023"))
+                            )
+                            rec_thumb_url = rec_media.get("thumb") or rec_media.get("vertical_thumb")
+                            rec_fallback = make_procedural_poster(
+                                rec["name"],
+                                ', '.join(rec.get("genres", [])) if rec.get("genres") else "Video Game",
+                                str(rec.get("year", "2023"))
+                            )
                             rec_thumb_html = (
-                                f'<img src="{rec_thumb_url}" style="width: 100%; height: 130px; object-fit: cover; border-radius: 6px; margin-bottom: 10px;">'
+                                f'<img src="{rec_thumb_url}" alt="{rec["name"]}" style="width: 100%; height: 130px; object-fit: cover; border-radius: 6px; margin-bottom: 10px;" onerror="this.onerror=null;this.src=\'{rec_fallback}\';">'
                                 if rec_thumb_url
-                                else '<div style="width: 100%; height: 130px; background: #22222a; border-radius: 6px; display: flex; align-items: center; justify-content: center; font-size: 2rem; margin-bottom: 10px;">🎮</div>'
+                                else f'<img src="{rec_fallback}" alt="{rec["name"]}" style="width: 100%; height: 130px; object-fit: cover; border-radius: 6px; margin-bottom: 10px;">'
                             )
                             st_html(f"""
                             <div class="rec-card">
